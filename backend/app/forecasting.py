@@ -9,7 +9,14 @@ from statistics import mean
 from typing import Callable, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
+import numpy as np
+
 from .models import ForecastModel, ForecastPoint, ForecastSummary, SeriesPoint
+
+
+def sigmoid_vectorized(x):
+    x = np.clip(x, -50, 50)
+    return 1 / (1 + np.exp(-x))
 
 
 DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S")
@@ -576,18 +583,23 @@ def elm(values: List[float], horizon: int, lookback: int, hidden_units: int, reg
     samples = make_lag_samples(normalized, lookback)
     weights = random_matrix(hidden_units, lookback, 0.85)
     biases = random_vector(hidden_units, 0.35)
-    hidden = [[sigmoid(dot(weights[node], sample) + biases[node]) for node in range(hidden_units)] for sample, _ in samples]
-    targets = [target for _, target in samples]
-    output_weights = ridge_solve(hidden, targets, regularization)
 
-    window = normalized[-lookback:]
+    weights_arr = np.array(weights, dtype=float)
+    biases_arr = np.array(biases, dtype=float)
+    inputs = np.array([s[0] for s in samples], dtype=float)
+    targets = np.array([s[1] for s in samples], dtype=float)
+
+    hidden = sigmoid_vectorized(inputs @ weights_arr.T + biases_arr)
+    output_weights = ridge_solve(hidden.tolist(), targets.tolist(), regularization)
+
+    window = np.array(normalized[-lookback:])
     predictions = []
     for _ in range(horizon):
-        features = [sigmoid(dot(weights[node], window) + biases[node]) for node in range(hidden_units)]
-        prediction = dot(output_weights, features)
+        features = sigmoid_vectorized(window @ weights_arr.T + biases_arr)
+        prediction = dot(output_weights, features.tolist())
         prediction = clamp_float(prediction, -8, 8)
         predictions.append(prediction * scale + center)
-        window = [*window[1:], prediction]
+        window = np.append(window[1:], prediction)
     return predictions
 
 
@@ -602,17 +614,24 @@ def lstm_forecast(
     normalized, center, scale = normalize_values(values)
     samples = make_lag_samples(normalized, lookback)
     cell = LstmCell(hidden_units)
-    states = [cell.encode(sample) for sample, _ in samples]
-    targets = [target for _, target in samples]
-    output_weights = ridge_solve(states, targets, regularization)
 
-    window = normalized[-lookback:]
+    inputs_arr = np.array([s[0] for s in samples], dtype=float)
+    targets_arr = np.array([s[1] for s in samples], dtype=float)
+
+    cell_np = np.array(cell.hidden_weights, dtype=float)
+    input_np = np.array(cell.input_weights, dtype=float)
+    bias_np = np.array(cell.biases, dtype=float)
+
+    states = np.array([cell.encode_vectorized(seq, cell_np, input_np, bias_np) for seq in inputs_arr])
+    output_weights = ridge_solve(states.tolist(), targets_arr.tolist(), regularization)
+
+    window = np.array(normalized[-lookback:])
     predictions = []
     for _ in range(horizon):
-        state = cell.encode(window)
-        prediction = clamp_float(dot(output_weights, state), -8, 8)
+        state = cell.encode_vectorized(window, cell_np, input_np, bias_np)
+        prediction = clamp_float(dot(output_weights, state.tolist()), -8, 8)
         predictions.append(prediction * scale + center)
-        window = [*window[1:], prediction]
+        window = np.append(window[1:], prediction)
     return predictions
 
 
@@ -655,6 +674,21 @@ class LstmCell:
             cell = next_cell
         return hidden
 
+    def encode_vectorized(self, sequence, hidden_weights, input_weights, biases):
+        hidden = np.zeros(self.hidden_units)
+        cell_state = np.zeros(self.hidden_units)
+        for value in sequence:
+            hidden_mix = hidden_weights[:, :self.hidden_units] @ hidden
+            gates = input_weights[:, 0] * value + hidden_mix + biases
+            gates = gates.reshape(4, self.hidden_units)
+            forget_gate = sigmoid_vectorized(gates[0])
+            input_gate = sigmoid_vectorized(gates[1])
+            output_gate = sigmoid_vectorized(gates[2])
+            candidate = np.tanh(gates[3])
+            cell_state = forget_gate * cell_state + input_gate * candidate
+            hidden = output_gate * np.tanh(cell_state)
+        return hidden
+
 
 def validate_window_model(
     values: List[float],
@@ -687,17 +721,16 @@ def make_lag_samples(values: List[float], lookback: int) -> List[Tuple[List[floa
 def ridge_solve(features: List[List[float]], targets: List[float], regularization: float) -> List[float]:
     if not features:
         raise ValueError("训练样本为空。")
-    columns = len(features[0])
-    matrix = [[0.0 for _ in range(columns)] for _ in range(columns)]
-    vector = [0.0 for _ in range(columns)]
-    for row, target in zip(features, targets):
-        for left in range(columns):
-            vector[left] += row[left] * target
-            for right in range(columns):
-                matrix[left][right] += row[left] * row[right]
-    for index in range(columns):
-        matrix[index][index] += regularization
-    return solve_linear_system(matrix, vector)
+    X = np.array(features, dtype=float)
+    y = np.array(targets, dtype=float)
+    columns = X.shape[1]
+    if columns == 0:
+        raise ValueError("特征维度为0。")
+    regularization_matrix = regularization * np.eye(columns)
+    try:
+        return np.linalg.solve(X.T @ X + regularization_matrix, X.T @ y).tolist()
+    except np.linalg.LinAlgError:
+        return solve_linear_system_pure_python(features, targets, regularization)
 
 
 def solve_linear_system(matrix: List[List[float]], vector: List[float]) -> List[float]:
@@ -718,6 +751,10 @@ def solve_linear_system(matrix: List[List[float]], vector: List[float]) -> List[
                 current - factor * base for current, base in zip(augmented[row], augmented[column])
             ]
     return [row[-1] for row in augmented]
+
+
+def solve_linear_system_pure_python(matrix: List[List[float]], vector: List[float]) -> List[float]:
+    return solve_linear_system(matrix, vector)
 
 
 def random_matrix(rows: int, columns: int, scale: float) -> List[List[float]]:
