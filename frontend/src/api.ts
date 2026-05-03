@@ -9,6 +9,8 @@ export type ForecastModelId =
 
 export type DecompositionModelId = "none" | "vmd" | "ssa" | "ewt";
 
+export type CombinationModelId = "additive" | "pso_cs";
+
 export type ModelParameter = {
   name: string;
   label: string;
@@ -145,6 +147,7 @@ export async function startForecast(
   decomposition: DecompositionModelId,
   decompositionParameters: Record<string, number>,
   autoTuneDecomposition: boolean,
+  combination: CombinationModelId = "additive",
 ): Promise<ForecastJob> {
   const form = new FormData();
   form.append("file", file);
@@ -158,6 +161,7 @@ export async function startForecast(
       decomposition,
       decomposition_parameters: decompositionParameters,
       auto_tune_decomposition: autoTuneDecomposition,
+      combination,
     }),
   );
   const response = await fetch(`${API_BASE}/api/forecast`, {

@@ -13,6 +13,7 @@ from .decomposition import (
     decomposition_candidates,
     decompose_values,
     default_decomposition_parameters,
+    pso_cs_optimize_weights,
 )
 from .forecasting import (
     SUPPORTED_FILE_EXTENSIONS,
@@ -25,6 +26,7 @@ from .forecasting import (
     summarize_forecast,
 )
 from .models import (
+    CombinationModel,
     DecompositionComponentSummary,
     DecompositionInfo,
     DecompositionModel,
@@ -623,7 +625,19 @@ def run_decomposed_pipeline(
         component_forecasts.append(forecast)
         component_parameters.append(parameters)
 
-    combined_forecast = combine_component_forecasts(component_forecasts)
+    if request.combination == CombinationModel.pso_cs and component_count > 1:
+        update_job(job_id, stage="PSO-CS优化权重", progress=86)
+        weights = optimize_pso_cs_component_weights(
+            history,
+            request,
+            decomposition_parameters,
+            component_parameters,
+            component_count,
+            usage,
+        )
+        combined_forecast = combine_with_weights(component_forecasts, weights)
+    else:
+        combined_forecast = combine_component_forecasts(component_forecasts)
     decomposition_run = DecompositionRun(
         model=request.decomposition,
         parameters=decomposition_parameters,
@@ -738,6 +752,74 @@ def backtest_decomposition_candidate(
     return [point.value for point in combine_component_forecasts(component_forecasts)]
 
 
+def optimize_pso_cs_component_weights(
+    history: list[SeriesPoint],
+    request: ForecastRequest,
+    decomposition_parameters: Dict[str, float],
+    component_parameters: list[Dict[str, float]],
+    component_count: int,
+    usage: JobUsage,
+) -> list[float]:
+    baseline_weights = [1.0] * component_count
+    test_size = choose_test_size(len(history))
+    if test_size < 1 or len(history) - test_size < 6:
+        return baseline_weights
+
+    train = history[:-test_size]
+    actual = [point.value for point in history[-test_size:]]
+    train_values = [point.value for point in train]
+    try:
+        decomposed = decompose_values(train_values, request.decomposition, decomposition_parameters)
+    except ValueError:
+        return baseline_weights
+    if len(decomposed.components) != component_count:
+        return baseline_weights
+
+    dates = [point.date for point in train]
+    validation_component_predictions = []
+    for index, component_values in enumerate(decomposed.components):
+        component_history = series_from_values(dates, component_values)
+        parameters = component_parameters[index] if index < len(component_parameters) else request.parameters
+        forecast = forecast_series(component_history, request.model, test_size, parameters)
+        validation_component_predictions.append([point.value for point in forecast])
+        usage.model_runs += 1
+
+    weights = pso_cs_optimize_weights(
+        validation_component_predictions,
+        actual,
+        baseline_weights=baseline_weights,
+    )
+    if not pso_cs_beats_additive(validation_component_predictions, actual, weights):
+        return baseline_weights
+    return weights
+
+
+def pso_cs_beats_additive(
+    component_predictions: list[list[float]],
+    actual: list[float],
+    weights: list[float],
+) -> bool:
+    if not component_predictions or len(weights) != len(component_predictions):
+        return False
+    validation_count = min(len(actual), *(len(prediction) for prediction in component_predictions))
+    if validation_count < 1:
+        return False
+
+    additive = [
+        sum(prediction[index] for prediction in component_predictions)
+        for index in range(validation_count)
+    ]
+    weighted = [
+        sum(
+            prediction[index] * weights[component_index]
+            for component_index, prediction in enumerate(component_predictions)
+        )
+        for index in range(validation_count)
+    ]
+    actual_slice = actual[:validation_count]
+    return rmse(actual_slice, weighted) <= rmse(actual_slice, additive)
+
+
 def normalized_decomposition_parameters(
     model: DecompositionModel,
     current_parameters: Dict[str, float],
@@ -760,6 +842,22 @@ def combine_component_forecasts(component_forecasts: list[list[ForecastPoint]]) 
             ForecastPoint(
                 date=component_forecasts[0][index].date,
                 value=round(sum(forecast[index].value for forecast in component_forecasts), 4),
+            )
+        )
+    return combined
+
+
+def combine_with_weights(component_forecasts: list[list[ForecastPoint]], weights: list[float]) -> list[ForecastPoint]:
+    if not component_forecasts or len(weights) != len(component_forecasts):
+        raise ValueError("没有可组合的子序列预测结果或权重。")
+    forecast_count = len(component_forecasts[0])
+    combined = []
+    for index in range(forecast_count):
+        combined_value = sum(forecast[index].value * weights[i] for i, forecast in enumerate(component_forecasts))
+        combined.append(
+            ForecastPoint(
+                date=component_forecasts[0][index].date,
+                value=round(combined_value, 4),
             )
         )
     return combined

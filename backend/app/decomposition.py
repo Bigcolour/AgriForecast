@@ -1,9 +1,15 @@
 import math
 from dataclasses import dataclass
 from statistics import mean
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 from .models import DecompositionModel
+
+
+def require_numpy():
+    return np
 
 
 @dataclass
@@ -360,3 +366,131 @@ def with_residual(series, names: List[str], components: List[List[float]], resid
         names = [*names, residual_name]
         components = [*components, residual.astype(float).tolist()]
     return DecomposedSeries(names=names, components=components)
+
+
+def pso_cs_optimize_weights(
+    component_predictions: List[List[float]],
+    target_values: List[float],
+    n_iter: int = 120,
+    sizepop: int = 40,
+    baseline_weights: Optional[List[float]] = None,
+) -> List[float]:
+    n_components = len(component_predictions)
+    if n_components == 0:
+        return []
+    if n_components == 1:
+        return [1.0]
+
+    min_len = min(len(prediction) for prediction in component_predictions)
+    min_len = min(min_len, len(target_values))
+    if min_len < 1:
+        return [1.0] * n_components
+
+    train_true = np.asarray(target_values[:min_len], dtype=float)
+    train_preds = np.asarray([prediction[:min_len] for prediction in component_predictions], dtype=float)
+    if train_preds.shape != (n_components, min_len):
+        return [1.0] * n_components
+
+    baseline = np.asarray(baseline_weights if baseline_weights else [1.0] * n_components, dtype=float)
+    if baseline.shape != (n_components,):
+        baseline = np.ones(n_components, dtype=float)
+
+    c1 = 1.4999
+    c2 = 1.4999
+    wmax = 0.9
+    wmin = 0.4
+    pa = 0.25
+    popmin = 0.0
+    popmax = max(2.0, float(np.max(baseline)) * 1.5)
+    Vmin = -(popmax - popmin) * 0.25
+    Vmax = (popmax - popmin) * 0.25
+    rng = np.random.default_rng(20240517 + n_components * 31 + min_len)
+
+    baseline = np.clip(baseline, popmin, popmax)
+    pop = rng.uniform(popmin, popmax, size=(sizepop, n_components))
+    pop[0] = baseline
+    for index in range(1, min(sizepop, n_components + 1)):
+        pop[index] = np.clip(baseline + rng.normal(0, 0.2, size=n_components), popmin, popmax)
+
+    V = np.zeros((sizepop, n_components))
+    target_scale = max(float(np.var(train_true)), 1.0)
+
+    def prediction_error(weights: np.ndarray) -> float:
+        combined = np.dot(weights, train_preds)
+        return float(np.mean((train_true - combined) ** 2))
+
+    def fitness(weights: np.ndarray) -> float:
+        stability_penalty = 0.002 * target_scale * float(np.mean((weights - baseline) ** 2))
+        return prediction_error(weights) + stability_penalty
+
+    fitness_vals = np.array([fitness(pop[i]) for i in range(sizepop)])
+
+    best_idx = np.argmin(fitness_vals)
+    zbest = pop[best_idx].copy()
+    gbest = pop.copy()
+    fitness_gbest = fitness_vals.copy()
+    fitness_zbest = fitness_vals[best_idx]
+
+    for iteration in range(n_iter):
+        for i in range(sizepop):
+            w = wmax - (wmax - wmin) * (iteration / max(n_iter - 1, 1))
+            V[i] = w * V[i] + c1 * rng.random() * (gbest[i] - pop[i]) + c2 * rng.random() * (zbest - pop[i])
+            V[i] = np.clip(V[i], Vmin, Vmax)
+            pop[i] = pop[i] + 0.5 * V[i]
+            pop[i] = np.clip(pop[i], popmin, popmax)
+
+            new_fitness = fitness(pop[i])
+            fitness_vals[i] = new_fitness
+            if new_fitness < fitness_gbest[i]:
+                fitness_gbest[i] = new_fitness
+                gbest[i] = pop[i].copy()
+            if new_fitness < fitness_zbest:
+                fitness_zbest = new_fitness
+                zbest = pop[i].copy()
+
+        for i in range(sizepop):
+            new_nest = levy_flight(zbest, pop[i], popmin, popmax, rng)
+            new_fitness = fitness(new_nest)
+            if new_fitness <= fitness_vals[i]:
+                fitness_vals[i] = new_fitness
+                pop[i] = new_nest
+
+        for i in range(sizepop):
+            if rng.random() < pa:
+                new_nest = empty_nest(pop, popmin, popmax, rng)
+                new_fitness = fitness(new_nest)
+                if new_fitness <= fitness_vals[i]:
+                    fitness_vals[i] = new_fitness
+                    pop[i] = new_nest
+
+        for i in range(sizepop):
+            if fitness_vals[i] < fitness_zbest:
+                fitness_zbest = fitness_vals[i]
+                zbest = pop[i].copy()
+
+    final_weights = np.clip(zbest, popmin, popmax)
+    if prediction_error(final_weights) > prediction_error(baseline):
+        final_weights = baseline
+    return final_weights.tolist()
+
+
+def levy_flight(best, nest, popmin, popmax, rng):
+    beta = 1.8
+    sigma = (math.gamma(1 + beta) * math.sin(math.pi * beta / 2) / (
+        math.gamma((1 + beta) / 2) * beta * 2 ** ((beta - 1) / 2)
+    )) ** (1 / beta)
+    n = len(nest)
+    u = rng.normal(size=n) * sigma
+    v = rng.normal(size=n)
+    step = u / (abs(v) ** (1 / beta))
+    stepsize = 0.01 * step * (nest - best)
+    return np.clip(nest + stepsize * rng.normal(size=n), popmin, popmax)
+
+
+def empty_nest(pop, popmin, popmax, rng):
+    n, m = pop.shape
+    j = rng.integers(n)
+    new_nest = pop[j].copy()
+    if rng.random() < 0.25:
+        new_nest = new_nest + rng.random() * (pop[rng.integers(n)] - pop[rng.integers(n)])
+    return np.clip(new_nest, popmin, popmax)

@@ -1,6 +1,17 @@
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip as ChartTooltip,
+  Legend as ChartLegend,
+} from "chart.js";
+import { Line } from "react-chartjs-2";
+import {
   Activity,
   BarChart3,
   CheckCircle2,
@@ -8,23 +19,16 @@ import {
   FileSpreadsheet,
   FileUp,
   Info,
+  Layers,
   Loader2,
   Play,
   Server,
   Trash2,
   UploadCloud,
 } from "lucide-react";
+
 import {
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import {
+  CombinationModelId,
   DecompositionInfo,
   DecompositionModelId,
   fetchDecompositions,
@@ -38,6 +42,8 @@ import {
   startForecast,
 } from "./api";
 
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, ChartTooltip, ChartLegend);
+
 type RunState = "idle" | "submitting" | "polling" | "completed" | "failed";
 type ServerState = "checking" | "online" | "offline";
 type MetricTone = "neutral" | "success" | "danger";
@@ -50,6 +56,7 @@ type ChartPoint = {
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const PREVIEW_LIMIT = 6;
+const SAMPLE_ROW_COUNT = 300;
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 type CsvPreview = {
@@ -65,23 +72,26 @@ type CsvPreview = {
   issue?: string;
 };
 
-const SAMPLE_CSV = `date,value
-2025-01-01,118
-2025-01-02,122
-2025-01-03,121
-2025-01-04,128
-2025-01-05,135
-2025-01-06,132
-2025-01-07,140
-2025-01-08,143
-2025-01-09,147
-2025-01-10,150
-2025-01-11,154
-2025-01-12,158
-2025-01-13,157
-2025-01-14,164
-2025-01-15,168
-`;
+function createSampleCsv(rowCount: number): string {
+  const startDate = Date.UTC(2025, 0, 1);
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  const rows = Array.from({ length: rowCount }, (_, index) => {
+    const date = new Date(startDate + index * oneDayMs).toISOString().slice(0, 10);
+    const trend = 118 + index * 0.34;
+    const weeklyCycle = Math.sin((index / 7) * Math.PI * 2) * 8;
+    const monthlyCycle = Math.cos((index / 30) * Math.PI * 2) * 5;
+    const midSeasonLift = index >= 145 && index <= 190 ? 11 : 0;
+    const shortDip = index >= 235 && index <= 250 ? -9 : 0;
+    const jitter = (((index * 37) % 17) - 8) * 0.45;
+    const value = trend + weeklyCycle + monthlyCycle + midSeasonLift + shortDip + jitter;
+
+    return `${date},${value.toFixed(1)}`;
+  });
+
+  return ["date,value", ...rows].join("\n");
+}
+
+const SAMPLE_CSV = createSampleCsv(SAMPLE_ROW_COUNT);
 
 const statusText: Record<ForecastJob["status"], string> = {
   queued: "排队中",
@@ -101,6 +111,7 @@ export default function App() {
   const [decompositions, setDecompositions] = useState<DecompositionInfo[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<ForecastModelId>("moving_average");
   const [selectedDecompositionId, setSelectedDecompositionId] = useState<DecompositionModelId>("none");
+  const [selectedCombinationId, setSelectedCombinationId] = useState<CombinationModelId>("additive");
   const [file, setFile] = useState<File | null>(null);
   const [horizon, setHorizon] = useState(14);
   const [horizonInput, setHorizonInput] = useState("14");
@@ -225,6 +236,10 @@ export default function App() {
     if (nextModel) {
       setDecompositionParameters(defaultParameters(nextModel));
     }
+  }
+
+  function handleCombinationChange(combinationId: CombinationModelId) {
+    setSelectedCombinationId(combinationId);
   }
 
   async function acceptFile(nextFile: File | null) {
@@ -364,6 +379,7 @@ export default function App() {
         currentDecomposition.id,
         normalizedDecompositionParameters,
         autoTuneDecomposition && currentDecomposition.id !== "none",
+        selectedCombinationId,
       );
       setJob(created);
       setRunState("polling");
@@ -637,7 +653,34 @@ export default function App() {
                 <span>{selectedModel.best_for}</span>
               </div>
             )}
+          </Panel>
 
+          <Panel title="4 组合模型" icon={<Layers size={18} />}>
+            {selectedDecompositionId === "none" ? (
+              <div className="model-note">
+                <span>请先在「分解设置」中选择分解方式，才可配置组合模型。</span>
+              </div>
+            ) : (
+              <>
+                <div className="form-row">
+                  <label htmlFor="combination">组合方式</label>
+                  <select
+                    id="combination"
+                    value={selectedCombinationId}
+                    disabled={isBusy}
+                    onChange={(event) => handleCombinationChange(event.target.value as CombinationModelId)}
+                  >
+                    <option value="additive">加法模型</option>
+                    <option value="pso_cs">PSO-CS 加权</option>
+                  </select>
+                </div>
+                <p className="model-description">
+                  {selectedCombinationId === "additive"
+                    ? "将各子序列预测结果直接相加。计算快速，适合子序列独立性较强的场景。"
+                    : "使用粒子群-杜鹃搜索混合算法优化各子序列权重，提升组合预测精度。计算耗时较长。"}
+                </p>
+              </>
+            )}
             <button
               className="control-button primary submit-button"
               disabled={isBusy || !models.length}
@@ -841,38 +884,78 @@ function Metric({ label, value, tone = "neutral" }: { label: string; value: stri
 }
 
 const ForecastChart = memo(function ForecastChart({ chartData }: { chartData: ChartPoint[] }) {
+  const chartDataMemo = useMemo(() => {
+    if (chartData.length === 0) return null;
+
+    return {
+      labels: chartData.map((p) => p.date),
+      datasets: [
+        {
+          label: "历史值",
+          data: chartData.map((p) => p.actual),
+          borderColor: "#2563eb",
+          backgroundColor: "#2563eb",
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0,
+          spanGaps: true,
+        },
+        {
+          label: "预测值",
+          data: chartData.map((p) => p.forecast),
+          borderColor: "#dc2626",
+          backgroundColor: "#dc2626",
+          borderWidth: 2,
+          borderDash: [6, 4],
+          pointRadius: 3,
+          tension: 0,
+          spanGaps: true,
+        },
+      ],
+    };
+  }, [chartData]);
+
+  const options = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 0 },
+      plugins: {
+        legend: {
+          position: "top" as const,
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx: { dataset: { label?: string }; raw: unknown }) =>
+              `${ctx.dataset.label}: ${formatNumber(Number(ctx.raw))}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            maxTicksLimit: 10,
+            font: { size: 12 },
+          },
+        },
+        y: {
+          ticks: {
+            callback: (value: unknown) => formatNumber(Number(value)),
+            font: { size: 12 },
+          },
+        },
+      },
+    }),
+    [],
+  );
+
   return (
     <Panel title="预测图表" icon={<BarChart3 size={18} />}>
       <div className="chart-box">
-        {chartData.length > 0 ? (
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 10, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
-              <XAxis dataKey="date" minTickGap={28} tick={{ fontSize: 12 }} />
-              <YAxis width={72} tick={{ fontSize: 12 }} />
-              <Tooltip formatter={(value) => formatNumber(Number(value))} />
-              <Legend />
-              <Line
-                type="monotone"
-                dataKey="actual"
-                name="历史值"
-                stroke="#2563eb"
-                strokeWidth={2}
-                dot={false}
-                connectNulls={false}
-              />
-              <Line
-                type="monotone"
-                dataKey="forecast"
-                name="预测值"
-                stroke="#dc2626"
-                strokeWidth={2}
-                strokeDasharray="6 4"
-                dot={{ r: 3 }}
-                connectNulls={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
+        {chartData.length > 0 && chartDataMemo ? (
+          <div style={{ height: "85%", width: "100%" }}>
+            <Line data={chartDataMemo} options={options} />
+          </div>
         ) : (
           <div className="empty-state">提交任务后显示图表。</div>
         )}

@@ -22,6 +22,11 @@ class DecompositionModel(str, Enum):
     ewt = "ewt"
 
 
+class CombinationModel(str, Enum):
+    additive = "additive"
+    pso_cs = "pso_cs"
+
+
 class ForecastRequest(BaseModel):
     model: ForecastModel
     horizon: int = Field(default=7, ge=1, le=365)
@@ -30,6 +35,7 @@ class ForecastRequest(BaseModel):
     decomposition: DecompositionModel = DecompositionModel.none
     decomposition_parameters: Dict[str, float] = Field(default_factory=dict)
     auto_tune_decomposition: bool = False
+    combination: CombinationModel = CombinationModel.additive
 
 
 class SeriesPoint(BaseModel):
