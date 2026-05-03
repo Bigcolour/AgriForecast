@@ -84,14 +84,14 @@ def list_models() -> list[ModelInfo]:
     return [
         ModelInfo(
             id=ForecastModel.naive,
-            name="朴素预测",
+            name="Naive Forecast（朴素预测）",
             description="直接把最后一个真实观测值作为所有未来点的预测值。",
             best_for="短期基线、数据波动较小或需要快速建立参考结果的场景。",
             parameters=[],
         ),
         ModelInfo(
             id=ForecastModel.moving_average,
-            name="移动平均",
+            name="Moving Average（移动平均）",
             description="使用最近一段窗口内的平均值预测下一期，并递推生成多期预测。",
             best_for="没有明显趋势、但存在随机波动的平稳序列。",
             parameters=[
@@ -121,7 +121,7 @@ def list_models() -> list[ModelInfo]:
         ),
         ModelInfo(
             id=ForecastModel.exponential_smoothing,
-            name="简单指数平滑",
+            name="Simple Exponential Smoothing（简单指数平滑）",
             description="使用指数衰减权重融合历史值，越新的数据权重越高。",
             best_for="水平变化缓慢、无强趋势或强季节性的业务指标。",
             parameters=[
@@ -151,7 +151,7 @@ def list_models() -> list[ModelInfo]:
         ),
         ModelInfo(
             id=ForecastModel.linear_trend,
-            name="线性趋势",
+            name="Linear Trend（线性趋势）",
             description="拟合一条线性趋势线，并按趋势向未来延伸。",
             best_for="存在持续上升或下降趋势、季节性不强的序列。",
             parameters=[
@@ -181,7 +181,7 @@ def list_models() -> list[ModelInfo]:
         ),
         ModelInfo(
             id=ForecastModel.ets,
-            name="ETS 指数平滑",
+            name="ETS（指数平滑）",
             description="使用水平、趋势和可选季节项递推预测，适合带趋势或周期波动的序列。",
             best_for="日销售、访问量、库存等有平滑趋势和固定周期的数据。",
             parameters=[
@@ -244,7 +244,7 @@ def list_models() -> list[ModelInfo]:
         ),
         ModelInfo(
             id=ForecastModel.elm,
-            name="ELM 极限学习机",
+            name="ELM（极限学习机）",
             description="把历史窗口映射到随机隐藏层，并用岭回归训练输出层进行递推预测。",
             best_for="中小规模单变量序列，需要快速非线性基线模型的场景。",
             parameters=[
@@ -296,7 +296,7 @@ def list_models() -> list[ModelInfo]:
         ),
         ModelInfo(
             id=ForecastModel.lstm,
-            name="LSTM 循环网络",
+            name="LSTM（循环网络）",
             description="使用轻量 LSTM 风格门控循环单元提取时序状态，并训练输出层递推预测。",
             best_for="存在非线性变化、近期状态对未来影响较强的单变量序列。",
             parameters=[
